@@ -22,9 +22,10 @@ import io
 import zipfile
 
 import requests
-from flask import Flask, request, jsonify, render_template_string, send_file
+from flask import Flask, request, jsonify, render_template_string, send_file, session, redirect, url_for
 
 app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "zetapull-change-me-in-production")
 
 BASE_URL = "https://api.dhan.co/v2"
 
@@ -887,6 +888,12 @@ def cancel():
     return jsonify({"ok": False, "error": "Nothing running"}), 400
 
 
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect(url_for("index_page"))
+
+
 @app.route("/download")
 def download():
     with _lock:
@@ -913,8 +920,15 @@ TEMPLATE = r"""
   * { box-sizing: border-box; }
   body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0;
          background: #0f1419; color: #d7dee8; }
-  header { padding: 12px 22px 0; background: #161d27; border-bottom: 1px solid #243044; }
+  header { padding: 12px 22px 0; background: #161d27; border-bottom: 1px solid #243044;
+           display: flex; align-items: flex-start; justify-content: space-between; }
   header h1 { margin: 0 0 10px; font-size: 16px; font-weight: 600; }
+  .header-left { flex: 1; }
+  .logout-btn { margin-top: 4px; padding: 6px 14px; font-size: 12px; font-weight: 600;
+                background: transparent; color: #94a0b6; border: 1px solid #2a3548;
+                border-radius: 5px; cursor: pointer; text-decoration: none; white-space: nowrap;
+                transition: background 0.15s, color 0.15s; }
+  .logout-btn:hover { background: #b03030; color: #fff; border-color: #b03030; }
   header small { color: #7d8aa0; }
   .tabs { display: flex; gap: 2px; }
   .tab { padding: 8px 16px; font-size: 13px; cursor: pointer;
@@ -962,14 +976,17 @@ TEMPLATE = r"""
 </head><body>
 
 <header>
-  <h1>ZetaPull
-    <small>· Expired Options · NIFTY Futures with auto-rollover</small>
-  </h1>
-  <div class="tabs">
-    <div id="tab-opt" class="tab active" onclick="showTab('opt')">Expired Options</div>
-    <div id="tab-fut" class="tab" onclick="showTab('fut')">Futures</div>
-    <div id="tab-eq"  class="tab" onclick="showTab('eq')">Equity Data</div>
+  <div class="header-left">
+    <h1>ZetaPull
+      <small>· Expired Options · NIFTY Futures with auto-rollover</small>
+    </h1>
+    <div class="tabs">
+      <div id="tab-opt" class="tab active" onclick="showTab('opt')">Expired Options</div>
+      <div id="tab-fut" class="tab" onclick="showTab('fut')">Futures</div>
+      <div id="tab-eq"  class="tab" onclick="showTab('eq')">Equity Data</div>
+    </div>
   </div>
+  <a href="/logout" class="logout-btn">Logout</a>
 </header>
 
 <div class="wrap">
