@@ -15,6 +15,8 @@ import os
 import csv
 import glob
 import threading
+import time
+import pyotp
 from collections import defaultdict
 from datetime import datetime, timedelta, date as date_cls
 
@@ -56,6 +58,36 @@ def log(msg):
         _progress["logs"].append(f"[{ts}] {msg}")
         if len(_progress["logs"]) > 500:
             _progress["logs"] = _progress["logs"][-500:]
+
+
+# ── Dhan auto-token via PIN + TOTP ─────────────────────────────────
+_DHAN_TOKEN = {"value": None, "at": 0}
+
+def get_access_token(force=False):
+    """Generate a fresh Dhan access token from PIN + TOTP. Cached ~20h."""
+    now = time.time()
+    if not force and _DHAN_TOKEN["value"] and (now - _DHAN_TOKEN["at"]) < 20 * 3600:
+        return _DHAN_TOKEN["value"]
+    client_id = os.environ.get("DHAN_CLIENT_ID", "").strip()
+    pin       = os.environ.get("DHAN_PIN", "").strip()
+    secret    = os.environ.get("DHAN_TOTP_SECRET", "").strip()
+    if not (client_id and pin and secret):
+        raise RuntimeError("DHAN_CLIENT_ID / DHAN_PIN / DHAN_TOTP_SECRET not set on the server")
+    code = pyotp.TOTP(secret).now()              # current 6-digit code
+    resp = requests.post(
+        "https://auth.dhan.co/app/generateAccessToken",
+        params={"dhanClientId": client_id, "pin": pin, "totp": code},
+        timeout=20,
+    )
+    data = resp.json() if resp.content else {}
+    token = (data.get("accessToken")
+             or (data.get("data") or {}).get("accessToken")
+             or data.get("access_token"))
+    if not token:
+        raise RuntimeError(f"Token generation failed ({resp.status_code}): {str(data)[:300]}")
+    _DHAN_TOKEN["value"] = token
+    _DHAN_TOKEN["at"] = now
+    return token
 
 
 def fetch_rolling_option(token, index_cfg, from_date, to_date, interval,
@@ -565,6 +597,12 @@ def futures_contracts():
 def start_futures():
     data = request.get_json(force=True)
 
+    if not data.get("token"):
+        try:
+            data["token"] = get_access_token()
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
+
     required = ["token", "interval", "fromDate", "toDate", "outputFolder"]
     missing = [k for k in required if not str(data.get(k, "")).strip()]
     if missing:
@@ -769,6 +807,12 @@ def equity_parse_csv():
 def start_equity():
     data = request.get_json(force=True)
 
+    if not data.get("token"):
+        try:
+            data["token"] = get_access_token()
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
+
     required = ["token", "interval", "fromDate", "toDate", "outputFolder", "csvText"]
     missing = [k for k in required if not str(data.get(k, "")).strip()]
     if missing:
@@ -824,6 +868,12 @@ def start_equity():
 @app.route("/start", methods=["POST"])
 def start():
     data = request.get_json(force=True)
+
+    if not data.get("token"):
+        try:
+            data["token"] = get_access_token()
+        except Exception as e:
+            return jsonify({"error": str(e)}), 400
 
     required = ["token", "index", "interval", "fromDate", "toDate",
                 "expiryFlag", "expiryCode", "strikeRange", "optionType", "outputFolder"]
@@ -886,6 +936,16 @@ def cancel():
             _progress["cancelled"] = True
             return jsonify({"ok": True})
     return jsonify({"ok": False, "error": "Nothing running"}), 400
+
+
+@app.route("/auth/token")
+def auth_token():
+    force = request.args.get("force") == "1"
+    try:
+        tok = get_access_token(force=force)
+        return jsonify({"ok": True, "preview": tok[:12] + "...", "len": len(tok)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
 
 
 @app.route("/logout")
@@ -1004,7 +1064,7 @@ TEMPLATE = r"""
       <input id="clientId" placeholder="Dhan client ID">
 
       <label>API Access Token</label>
-      <input id="token" type="password" placeholder="access-token">
+      <input id="token" type="password" placeholder="leave blank to auto-generate">
 
       <div class="row">
         <div><label>From Date</label><input id="fromDate" type="date"></div>
@@ -1069,7 +1129,7 @@ TEMPLATE = r"""
       <input id="fut_clientId" placeholder="Dhan client ID">
 
       <label>API Access Token</label>
-      <input id="fut_token" type="password" placeholder="access-token">
+      <input id="fut_token" type="password" placeholder="leave blank to auto-generate">
 
       <div class="row">
         <div><label>From Date</label><input id="fut_fromDate" type="date"></div>
@@ -1112,7 +1172,7 @@ TEMPLATE = r"""
       <input id="eq_clientId" placeholder="Dhan client ID">
 
       <label>API Access Token</label>
-      <input id="eq_token" type="password" placeholder="access-token">
+      <input id="eq_token" type="password" placeholder="leave blank to auto-generate">
 
       <label>Symbols CSV (must contain SECURITY_ID column)</label>
       <input id="eq_csvFile" type="file" accept=".csv,text/csv"
@@ -1221,7 +1281,6 @@ function startEquity() {
     outputFolder: $('eq_outputFolder').value.trim(),
     csvText: _equityCsvText,
   };
-  if (!body.token) { alert('Access token is required'); return; }
   if (!body.fromDate || !body.toDate) { alert('From/To dates required'); return; }
   if (!body.outputFolder) { alert('Download location required'); return; }
   postStart('/start_equity', body, 'eq_goBtn');
@@ -1241,7 +1300,6 @@ function startOptions() {
     optionType: $('optionType').value,
     outputFolder: $('outputFolder').value.trim(),
   };
-  if (!body.token) { alert('Access token is required'); return; }
   if (!body.fromDate || !body.toDate) { alert('From/To dates required'); return; }
   if (!body.outputFolder) { alert('Download location required'); return; }
   postStart('/start', body, 'goBtn');
@@ -1257,7 +1315,6 @@ function startFutures() {
     outputFolder: $('fut_outputFolder').value.trim(),
     masterPath: $('fut_masterPath').value.trim(),
   };
-  if (!body.token) { alert('Access token is required'); return; }
   if (!body.fromDate || !body.toDate) { alert('From/To dates required'); return; }
   if (!body.outputFolder) { alert('Download location required'); return; }
   postStart('/start_futures', body, 'fut_goBtn');
