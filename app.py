@@ -18,8 +18,11 @@ import threading
 from collections import defaultdict
 from datetime import datetime, timedelta, date as date_cls
 
+import io
+import zipfile
+
 import requests
-from flask import Flask, request, jsonify, render_template_string
+from flask import Flask, request, jsonify, render_template_string, send_file
 
 app = Flask(__name__)
 
@@ -884,6 +887,22 @@ def cancel():
     return jsonify({"ok": False, "error": "Nothing running"}), 400
 
 
+@app.route("/download")
+def download():
+    with _lock:
+        files = list(_progress["files"])
+    if not files:
+        return "No files available. Run a download first.", 404
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fpath in files:
+            if os.path.isfile(fpath):
+                zf.write(fpath, os.path.basename(fpath))
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name="zetapull_output.zip",
+                     mimetype="application/zip")
+
+
 # ───────────────────────────────── Template ───────────────────────────────────
 
 TEMPLATE = r"""
@@ -1118,6 +1137,14 @@ TEMPLATE = r"""
     </div>
     <div id="msg" class="status"><span id="msgTxt">idle</span></div>
     <div id="files" class="files"></div>
+    <div id="downloadWrap" style="display:none; margin-top:14px;">
+      <a id="downloadBtn" href="/download"
+         style="display:inline-block; background:#1e7e34; color:#fff; font-size:14px;
+                font-weight:600; padding:10px 20px; border-radius:6px;
+                text-decoration:none; border:none; cursor:pointer;">
+        ⬇️ Download All CSV Files
+      </a>
+    </div>
     <pre id="logs" class="logs">Logs will appear here…</pre>
   </div>
 </div>
@@ -1279,6 +1306,11 @@ function poll() {
       $('stopBtn').style.display = 'none';
       clearInterval(pollTimer);
       pollTimer = null;
+      if (p.files && p.files.length) {
+        $('downloadWrap').style.display = 'block';
+      }
+    } else {
+      $('downloadWrap').style.display = 'none';
     }
   });
 }
