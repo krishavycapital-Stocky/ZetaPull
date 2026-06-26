@@ -1034,7 +1034,6 @@ LOGIN_TEMPLATE = """
    <button class="btn blue" type="submit">Use This Token</button>
  </form>
  {% if err %}<div class="err">{{ err }}</div>{% endif %}
- <a class="out" href="/logout">Sign out of ZetaPull</a>
 </div></body></html>
 """
 
