@@ -287,14 +287,43 @@ DEFAULT_MASTER_GLOBS = [
     os.path.expanduser("~/Downloads/**/api-scrip-master-detailed*.csv"),
 ]
 
+_uploaded_contracts = []
+
+
+def _parse_contracts_from_reader(reader, source_name="upload"):
+    """Parse NIFTY FUTIDX contracts from a csv.DictReader. Returns sorted list."""
+    seen = {}
+    for r in reader:
+        if (r.get("INSTRUMENT") != "FUTIDX"
+                or r.get("UNDERLYING_SECURITY_ID") != NIFTY_FUT_UNDERLYING_ID):
+            continue
+        sid = (r.get("SECURITY_ID") or "").strip()
+        if not sid or sid in seen:
+            continue
+        exp_str = (r.get("SM_EXPIRY_DATE") or "").strip()
+        try:
+            exp = datetime.strptime(exp_str[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        seen[sid] = {
+            "securityId": sid,
+            "displayName": (r.get("DISPLAY_NAME") or "").strip(),
+            "expiry": exp,
+            "exchangeSegment": "NSE_FNO",
+            "source": source_name,
+        }
+    return sorted(seen.values(), key=lambda c: c["expiry"])
+
 
 def load_nifty_futures_contracts(master_path_override=""):
     """
-    Scan one or more Dhan 'api-scrip-master-detailed*.csv' snapshots and
-    return a sorted, de-duplicated list of NIFTY FUTIDX contracts.
-
-    Each entry: {securityId, displayName, expiry (date), exchangeSegment, source}
+    Return sorted, de-duplicated list of NIFTY FUTIDX contracts.
+    If a CSV was uploaded via /futures/upload_master, use that directly.
+    Otherwise fall back to scanning local files.
     """
+    if _uploaded_contracts:
+        return list(_uploaded_contracts), ["<uploaded>"]
+
     paths = []
     if master_path_override.strip():
         p = os.path.expanduser(master_path_override.strip())
@@ -305,10 +334,9 @@ def load_nifty_futures_contracts(master_path_override=""):
     if not paths:
         for pattern in DEFAULT_MASTER_GLOBS:
             paths.extend(glob.glob(pattern, recursive=True))
-    # Dedup while preserving order
     paths = list(dict.fromkeys(os.path.realpath(p) for p in paths))
 
-    seen = {}  # securityId -> contract dict (first hit wins; later only fills source)
+    seen = {}
     for p in paths:
         try:
             with open(p, "r", encoding="utf-8-sig", errors="replace") as f:
@@ -596,6 +624,30 @@ def index_page():
     if not session.get("token"):
         return redirect("/login")
     return render_template_string(TEMPLATE)
+
+
+@app.route("/futures/upload_master", methods=["POST"])
+def futures_upload_master():
+    global _uploaded_contracts
+    data = request.get_json(force=True)
+    csv_text = data.get("csvText", "")
+    if not csv_text.strip():
+        return jsonify({"ok": False, "error": "Empty CSV"}), 400
+    try:
+        reader = csv.DictReader(io.StringIO(csv_text))
+        contracts = _parse_contracts_from_reader(reader, source_name="uploaded")
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    _uploaded_contracts = contracts
+    return jsonify({
+        "ok": True,
+        "count": len(contracts),
+        "contracts": [
+            {"securityId": c["securityId"], "displayName": c["displayName"],
+             "expiry": c["expiry"].strftime("%Y-%m-%d"), "source": c["source"]}
+            for c in contracts
+        ],
+    })
 
 
 @app.route("/futures/contracts")
@@ -1198,15 +1250,14 @@ TEMPLATE = r"""
       </select>
       <div class="hint">Daily → /charts/historical. Minute → /charts/intraday (90-day chunks).</div>
 
-      <label>Master CSV Path
+      <label>Scrip Master CSV
         <span style="float:right; font-weight: normal;">
-          <a href="#" onclick="loadContracts(); return false;"
+          <a href="#" onclick="uploadMasterCsv(); return false;"
              style="color:#4a7fd9; font-size: 11px;">↻ Refresh</a>
         </span>
       </label>
-      <input id="fut_masterPath" placeholder="leave blank → scans ~/Downloads/api-scrip-master-detailed*.csv">
-      <div class="hint">Dhan's scrip master is a current snapshot. Drop multiple
-        dated snapshots in <code>~/Downloads/</code> to cover historical contracts.</div>
+      <input type="file" id="fut_masterFile" accept=".csv">
+      <div class="hint">Upload your api-scrip-master-detailed.csv from Dhan</div>
 
       <div id="fut_contracts" class="contracts">Click ↻ Refresh to load NIFTY futures contracts…</div>
 
@@ -1364,7 +1415,6 @@ function startFutures() {
     toDate: $('fut_toDate').value,
     interval: $('fut_interval').value,
     outputFolder: $('fut_outputFolder').value.trim(),
-    masterPath: $('fut_masterPath').value.trim(),
   };
   if (!body.fromDate || !body.toDate) { alert('From/To dates required'); return; }
   if (!body.outputFolder) { alert('Download location required'); return; }
@@ -1388,16 +1438,37 @@ function cancelRun() {
   fetch('/cancel', {method:'POST'}).then(r => r.json());
 }
 
+function uploadMasterCsv() {
+  const f = $('fut_masterFile').files[0];
+  if (!f) { loadContracts(); return; }
+  const reader = new FileReader();
+  reader.onload = e => {
+    fetch('/futures/upload_master', {method: 'POST',
+                                     headers: {'Content-Type': 'application/json'},
+                                     body: JSON.stringify({csvText: e.target.result})})
+      .then(r => r.json())
+      .then(j => {
+        if (!j.ok) {
+          $('fut_contracts').innerHTML = '<span class="none">Upload error: ' + j.error + '</span>';
+          return;
+        }
+        loadContracts();
+      })
+      .catch(err => {
+        $('fut_contracts').innerHTML = '<span class="none">Upload error: ' + err + '</span>';
+      });
+  };
+  reader.readAsText(f);
+}
+
 function loadContracts() {
-  const mp = $('fut_masterPath').value.trim();
-  const url = '/futures/contracts' + (mp ? '?masterPath=' + encodeURIComponent(mp) : '');
   $('fut_contracts').textContent = 'loading…';
-  fetch(url).then(r => r.json()).then(j => {
+  fetch('/futures/contracts').then(r => r.json()).then(j => {
     window._contractsLoaded = true;
     if (!j.ok || !j.contracts.length) {
       $('fut_contracts').innerHTML =
         '<span class="none">No NIFTY futures contracts found.<br>' +
-        'Place api-scrip-master-detailed.csv in ~/Downloads/ or set the Master CSV Path.</span>';
+        'Upload your api-scrip-master-detailed.csv above.</span>';
       return;
     }
     const lines = j.contracts.map(c =>
