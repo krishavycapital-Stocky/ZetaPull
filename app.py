@@ -581,7 +581,7 @@ def login_page():
 @app.route("/login/dhan", methods=["POST"])
 def login_dhan():
     try:
-        _ACTIVE["token"] = get_access_token(force=True)
+        _ACTIVE["token"] = get_access_token()
         return redirect("/")
     except Exception as e:
         return redirect("/login?err=" + quote(str(e)))
