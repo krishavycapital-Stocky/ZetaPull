@@ -24,11 +24,11 @@ import io
 import zipfile
 
 import requests
-from flask import Flask, request, jsonify, render_template_string, send_file, redirect
+from flask import Flask, request, jsonify, render_template_string, send_file, redirect, session
 from urllib.parse import quote
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "zetapull-change-me-in-production")
+app.secret_key = os.environ.get("SECRET_KEY", "zetapull-dev-key-change-me")
 
 _ACTIVE = {"token": None}
 
@@ -90,6 +90,22 @@ def get_access_token(force=False):
         raise RuntimeError(f"Token generation failed ({resp.status_code}): {str(data)[:300]}")
     _DHAN_TOKEN["value"] = token
     _DHAN_TOKEN["at"] = now
+    return token
+
+
+def generate_token_with_creds(client_id, pin, totp):
+    """Fetch a Dhan access token from a user's own Client ID + PIN + live TOTP code."""
+    resp = requests.post(
+        "https://auth.dhan.co/app/generateAccessToken",
+        params={"dhanClientId": client_id.strip(), "pin": pin.strip(), "totp": totp.strip()},
+        timeout=20,
+    )
+    data = resp.json() if resp.content else {}
+    token = (data.get("accessToken")
+             or (data.get("data") or {}).get("accessToken")
+             or data.get("access_token"))
+    if not token:
+        raise RuntimeError(f"Login failed ({resp.status_code}): {str(data)[:300]}")
     return token
 
 
@@ -580,8 +596,14 @@ def login_page():
 
 @app.route("/login/dhan", methods=["POST"])
 def login_dhan():
+    client_id = request.form.get("client_id", "")
+    pin       = request.form.get("pin", "")
+    totp      = request.form.get("totp", "")
+    if not (client_id and pin and totp):
+        return redirect("/login?err=" + quote("Enter Client ID, PIN and the 6-digit code"))
     try:
-        _ACTIVE["token"] = get_access_token()
+        session["token"] = generate_token_with_creds(client_id, pin, totp)
+        session["client_id"] = client_id.strip()
         return redirect("/")
     except Exception as e:
         return redirect("/login?err=" + quote(str(e)))
@@ -591,17 +613,17 @@ def login_token():
     tok = (request.form.get("token") or "").strip()
     if not tok:
         return redirect("/login?err=" + quote("Please paste a token"))
-    _ACTIVE["token"] = tok
+    session["token"] = tok
     return redirect("/")
 
 @app.route("/logout")
 def logout():
-    _ACTIVE["token"] = None
+    session.clear()
     return redirect("/login")
 
 @app.route("/")
 def index_page():
-    if not _ACTIVE["token"]:
+    if not session.get("token"):
         return redirect("/login")
     return render_template_string(TEMPLATE)
 
@@ -628,12 +650,9 @@ def start_futures():
     data = request.get_json(force=True)
 
     if not data.get("token"):
-        data["token"] = _ACTIVE["token"]
+        data["token"] = session.get("token")
     if not data.get("token"):
-        try:
-            data["token"] = get_access_token()
-        except Exception as e:
-            return jsonify({"error": str(e)}), 400
+        return jsonify({"error": "Not logged in — please log in again."}), 401
 
     required = ["token", "interval", "fromDate", "toDate", "outputFolder"]
     missing = [k for k in required if not str(data.get(k, "")).strip()]
@@ -840,12 +859,9 @@ def start_equity():
     data = request.get_json(force=True)
 
     if not data.get("token"):
-        data["token"] = _ACTIVE["token"]
+        data["token"] = session.get("token")
     if not data.get("token"):
-        try:
-            data["token"] = get_access_token()
-        except Exception as e:
-            return jsonify({"error": str(e)}), 400
+        return jsonify({"error": "Not logged in — please log in again."}), 401
 
     required = ["token", "interval", "fromDate", "toDate", "outputFolder", "csvText"]
     missing = [k for k in required if not str(data.get(k, "")).strip()]
@@ -904,12 +920,9 @@ def start():
     data = request.get_json(force=True)
 
     if not data.get("token"):
-        data["token"] = _ACTIVE["token"]
+        data["token"] = session.get("token")
     if not data.get("token"):
-        try:
-            data["token"] = get_access_token()
-        except Exception as e:
-            return jsonify({"error": str(e)}), 400
+        return jsonify({"error": "Not logged in — please log in again."}), 401
 
     required = ["token", "index", "interval", "fromDate", "toDate",
                 "expiryFlag", "expiryCode", "strikeRange", "optionType", "outputFolder"]
@@ -1009,30 +1022,43 @@ LOGIN_TEMPLATE = """
 <style>
  *{box-sizing:border-box;font-family:ui-monospace,Menlo,Consolas,monospace}
  body{margin:0;min-height:100vh;background:#0b0f14;color:#e6ecf5;display:flex;align-items:center;justify-content:center}
- .card{width:380px;max-width:92vw;background:#11161f;border:1px solid #1c2531;border-radius:14px;padding:28px}
+ .card{width:400px;max-width:92vw;background:#11161f;border:1px solid #1c2531;border-radius:14px;padding:28px}
  .logo{font-size:30px;font-weight:700}.logo .a{color:#16d39a}.logo .b{color:#7a8aa0}
  .sub{color:#7a8aa0;font-size:13px;margin:4px 0 22px}
- .btn{display:block;width:100%;border:0;border-radius:9px;padding:13px;font-size:14px;font-weight:700;cursor:pointer;text-align:center;color:#06121b}
- .green{background:#16d39a}.blue{background:#2f7bf6;color:#fff}
+ .btn{display:block;width:100%;border:0;border-radius:9px;padding:13px;font-size:14px;font-weight:700;cursor:pointer;text-align:center}
+ .green{background:#16d39a;color:#06121b}.blue{background:#2f7bf6;color:#fff}
  .div{display:flex;align-items:center;gap:10px;color:#5e6f84;font-size:12px;margin:18px 0}
  .div:before,.div:after{content:'';flex:1;height:1px;background:#1c2531}
- label{display:block;font-size:11px;letter-spacing:.5px;color:#7a8aa0;margin:0 0 6px}
- input{width:100%;background:#0b0f14;border:1px solid #1c2531;border-radius:8px;color:#e6ecf5;padding:12px;font-size:13px;margin-bottom:12px}
- .err{background:#2a1116;border:1px solid #5a2230;color:#ff8aa0;border-radius:8px;padding:10px;font-size:12px;margin-top:6px;text-align:center}
- .out{display:block;text-align:center;color:#7a8aa0;font-size:12px;margin-top:14px;text-decoration:none}
+ label{display:block;font-size:11px;letter-spacing:.5px;color:#7a8aa0;margin:10px 0 6px}
+ input{width:100%;background:#0b0f14;border:1px solid #1c2531;border-radius:8px;color:#e6ecf5;padding:12px;font-size:13px}
+ .hint{color:#5e6f84;font-size:11px;margin:8px 0 2px}
+ .err{background:#2a1116;border:1px solid #5a2230;color:#ff8aa0;border-radius:8px;padding:10px;font-size:12px;margin-top:14px;text-align:center}
 </style></head>
 <body><div class="card">
  <div class="logo"><span class="a">Zeta</span><span class="b">Pull</span></div>
  <div class="sub">Dhan Historical Data Downloader</div>
+
  <form method="post" action="/login/dhan">
+   <div class="hint">Log in with your Dhan account</div>
+   <label>DHAN CLIENT ID</label>
+   <input name="client_id" placeholder="e.g. 1100000000" autocomplete="off">
+   <label>PIN</label>
+   <input name="pin" type="password" placeholder="your Dhan login PIN" autocomplete="off">
+   <label>AUTHENTICATOR CODE (6 DIGITS)</label>
+   <input name="totp" placeholder="from your authenticator app" autocomplete="off">
+   <div style="height:12px"></div>
    <button class="btn green" type="submit">Login with Dhan &rarr;</button>
  </form>
+
  <div class="div">or paste today's token directly</div>
+
  <form method="post" action="/login/token">
    <label>ACCESS TOKEN (IF YOU ALREADY HAVE IT)</label>
-   <input type="password" name="token" placeholder="Paste access_token here" autocomplete="off">
+   <input name="token" type="password" placeholder="Paste access_token here" autocomplete="off">
+   <div style="height:12px"></div>
    <button class="btn blue" type="submit">Use This Token</button>
  </form>
+
  {% if err %}<div class="err">{{ err }}</div>{% endif %}
 </div></body></html>
 """
