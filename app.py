@@ -63,36 +63,6 @@ def log(msg):
             _progress["logs"] = _progress["logs"][-500:]
 
 
-# ── Dhan auto-token via PIN + TOTP ─────────────────────────────────
-_DHAN_TOKEN = {"value": None, "at": 0}
-
-def get_access_token(force=False):
-    """Generate a fresh Dhan access token from PIN + TOTP. Cached ~20h."""
-    now = time.time()
-    if not force and _DHAN_TOKEN["value"] and (now - _DHAN_TOKEN["at"]) < 20 * 3600:
-        return _DHAN_TOKEN["value"]
-    client_id = os.environ.get("DHAN_CLIENT_ID", "").strip()
-    pin       = os.environ.get("DHAN_PIN", "").strip()
-    secret    = os.environ.get("DHAN_TOTP_SECRET", "").strip()
-    if not (client_id and pin and secret):
-        raise RuntimeError("DHAN_CLIENT_ID / DHAN_PIN / DHAN_TOTP_SECRET not set on the server")
-    code = pyotp.TOTP(secret).now()              # current 6-digit code
-    resp = requests.post(
-        "https://auth.dhan.co/app/generateAccessToken",
-        params={"dhanClientId": client_id, "pin": pin, "totp": code},
-        timeout=20,
-    )
-    data = resp.json() if resp.content else {}
-    token = (data.get("accessToken")
-             or (data.get("data") or {}).get("accessToken")
-             or data.get("access_token"))
-    if not token:
-        raise RuntimeError(f"Token generation failed ({resp.status_code}): {str(data)[:300]}")
-    _DHAN_TOKEN["value"] = token
-    _DHAN_TOKEN["at"] = now
-    return token
-
-
 def generate_token_with_creds(client_id, pin, totp):
     """Fetch a Dhan access token from a user's own Client ID + PIN + live TOTP code."""
     resp = requests.post(
@@ -985,16 +955,6 @@ def cancel():
             _progress["cancelled"] = True
             return jsonify({"ok": True})
     return jsonify({"ok": False, "error": "Nothing running"}), 400
-
-
-@app.route("/auth/token")
-def auth_token():
-    force = request.args.get("force") == "1"
-    try:
-        tok = get_access_token(force=force)
-        return jsonify({"ok": True, "preview": tok[:12] + "...", "len": len(tok)})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
 
 
 @app.route("/download")
