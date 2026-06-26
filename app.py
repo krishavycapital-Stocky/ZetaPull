@@ -581,7 +581,7 @@ def login_page():
 @app.route("/login/dhan", methods=["POST"])
 def login_dhan():
     try:
-        _ACTIVE["token"] = get_access_token(force=True)
+        _ACTIVE["token"] = get_access_token()
         return redirect("/")
     except Exception as e:
         return redirect("/login?err=" + quote(str(e)))
@@ -1034,7 +1034,6 @@ LOGIN_TEMPLATE = """
    <button class="btn blue" type="submit">Use This Token</button>
  </form>
  {% if err %}<div class="err">{{ err }}</div>{% endif %}
- <a class="out" href="/logout">Sign out of ZetaPull</a>
 </div></body></html>
 """
 
